@@ -1,0 +1,283 @@
+import os
+import base64
+import logging
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+from enum import Enum
+from dotenv import load_dotenv
+from openai import OpenAI
+from openai import APIError, APIConnectionError, RateLimitError
+
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# API Configuration
+class Config:
+    MODEL = "gpt-4o"
+    TEMPERATURE = 0.2
+    MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20MB
+    TIMEOUT = 30
+    DEFAULT_COUNTRY = "Bangladesh"
+
+# Initialize OpenAI client
+try:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable not set")
+    client = OpenAI(api_key=api_key)
+    logger.info("OpenAI client initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize OpenAI client: {e}")
+    client = None
+
+
+class ResponseStatus(Enum):
+    SUCCESS = "success"
+    ERROR = "error"
+    VALIDATION_ERROR = "validation_error"
+
+
+@dataclass
+class EstimationRequest:
+    """API Request model for car repair estimation"""
+    image_path: str
+    description: str
+    country: str = Config.DEFAULT_COUNTRY
+
+
+@dataclass
+class EstimationResponse:
+    """API Response model for car repair estimation"""
+    status: str
+    estimated_cost: Optional[int] = None
+    currency_country: Optional[str] = None
+    message: Optional[str] = None
+    error_details: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert response to dictionary for JSON serialization"""
+        return {
+            "status": self.status,
+            "estimated_cost": self.estimated_cost,
+            "currency_country": self.currency_country,
+            "message": self.message,
+            "error_details": self.error_details
+        }
+
+
+# ========================
+# VALIDATION & UTILITIES
+# ========================
+
+def validate_image_file(image_path: str) -> Optional[str]:
+    """
+    Validate image file exists and is within size limits.
+    Returns error message if invalid, None if valid.
+    """
+    if not image_path or not image_path.strip():
+        return "Image path cannot be empty"
+    
+    if not os.path.exists(image_path):
+        return f"Image file not found: {image_path}"
+    
+    if not os.path.isfile(image_path):
+        return f"Path is not a file: {image_path}"
+    
+    file_size = os.path.getsize(image_path)
+    if file_size > Config.MAX_IMAGE_SIZE:
+        return f"Image too large. Max size: {Config.MAX_IMAGE_SIZE / 1024 / 1024}MB, Got: {file_size / 1024 / 1024:.2f}MB"
+    
+    if file_size == 0:
+        return "Image file is empty"
+    
+    return None
+
+
+def validate_description(description: str) -> Optional[str]:
+    """
+    Validate description string.
+    Returns error message if invalid, None if valid.
+    """
+    if not description or not description.strip():
+        return "Description cannot be empty"
+    
+    if len(description) > 1000:
+        return "Description too long (max 1000 characters)"
+    
+    return None
+
+
+def validate_country(country: str) -> Optional[str]:
+    """
+    Validate country string.
+    Returns error message if invalid, None if valid.
+    """
+    if not country or not country.strip():
+        return "Country cannot be empty"
+    
+    if len(country) > 100:
+        return "Country name too long"
+    
+    return None
+
+
+def encode_image(image_path: str) -> str:
+    """
+    Convert image file to base64 string.
+    
+    Args:
+        image_path: Path to the image file
+        
+    Returns:
+        Base64 encoded string of the image
+        
+    Raises:
+        FileNotFoundError: If image file doesn't exist
+        IOError: If file cannot be read
+    """
+    logger.info(f"Encoding image: {image_path}")
+    try:
+        with open(image_path, "rb") as img_file:
+            encoded = base64.b64encode(img_file.read()).decode("utf-8")
+            logger.debug(f"Image encoded successfully, size: {len(encoded)} bytes")
+            return encoded
+    except FileNotFoundError:
+        logger.error(f"Image file not found: {image_path}")
+        raise
+    except IOError as e:
+        logger.error(f"Failed to read image file: {e}")
+        raise
+
+
+# ========================
+# MESSAGE BUILDING
+# ========================
+
+def build_messages(image_path: str, description: str, country: str = Config.DEFAULT_COUNTRY) -> list:
+    """
+    Build message payload for OpenAI API.
+    
+    Args:
+        image_path: Path to the image file
+        description: Description of car damage
+        country: Country for cost estimation
+        
+    Returns:
+        List of message dictionaries for OpenAI API
+    """
+    base64_image = encode_image(image_path)
+
+    prompt = f"""
+Estimate total car repair cost in {country}.
+
+Rules:
+- Output ONLY a number (no words, no currency symbol)
+- This number is total estimated repair cost in local currency
+- Use both image and description together
+- Be realistic and consistent
+- Assume standard sedan car (Toyota/Honda level)
+"""
+    
+    return [
+        {
+            "role": "system",
+            "content": "You are a highly accurate car repair cost estimator. Analyze the damage and provide ONLY a single number representing the estimated repair cost."
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                },
+                {"type": "text", "text": f"User description: {description}"}
+            ]
+        }
+    ]
+
+
+# ========================
+# API CALLS & PROCESSING
+# ========================
+
+def get_estimate(image_path: str, description: str, country: str = Config.DEFAULT_COUNTRY) -> str:
+    """
+    Call OpenAI API to get repair cost estimate.
+    
+    Args:
+        image_path: Path to the image file
+        description: Description of car damage
+        country: Country for cost estimation
+        
+    Returns:
+        Raw response content from OpenAI
+        
+    Raises:
+        APIError: If API call fails
+    """
+    if not client:
+        raise RuntimeError("OpenAI client not initialized")
+    
+    logger.info(f"Requesting estimate for {country}")
+    
+    try:
+        messages = build_messages(image_path, description, country)
+        
+        response = client.chat.completions.create(
+            model=Config.MODEL,
+            temperature=Config.TEMPERATURE,
+            messages=messages,
+            timeout=Config.TIMEOUT
+        )
+        
+        result = response.choices[0].message.content.strip()
+        logger.info(f"API response received: {result}")
+        return result
+        
+    except RateLimitError as e:
+        logger.error(f"Rate limit exceeded: {e}")
+        raise APIError(f"API rate limit exceeded. Please try again later.") from e
+    except APIConnectionError as e:
+        logger.error(f"API connection error: {e}")
+        raise APIError(f"Failed to connect to API. Please check your connection.") from e
+    except APIError as e:
+        logger.error(f"API error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error during API call: {e}")
+        raise APIError(f"Unexpected error during estimation: {str(e)}") from e
+
+
+# -----------------------------
+# MAIN FUNCTION (YOU USE THIS)
+# -----------------------------
+def estimate_car_price(image_path: str, description: str, country: str = "Bangladesh") -> int:
+    result = get_estimate(image_path, description, country)
+
+    try:
+        return int(float(result))
+    except:
+        return 0
+
+if __name__ == "__main__":
+    img_path = input("Enter the path to the car image: ").strip()
+    desc = input("Enter a description of the damage: ").strip()
+    loc = input("Enter the country (default: Bangladesh): ").strip()
+
+    if not loc:
+        loc = "Bangladesh"
+
+    if os.path.exists(img_path):
+        print("\nEstimating repair cost...")
+        cost = estimate_car_price(img_path, desc, loc)
+        print(f"\nRepair Cost in {loc}: {cost}")
+    else:
+        print(f"Error: File not found at {img_path}")
