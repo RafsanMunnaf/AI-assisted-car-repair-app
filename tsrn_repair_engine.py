@@ -788,3 +788,66 @@ def clear_history(session_id: str):
 def new_session() -> str:
     """Create a new unique session ID."""
     return str(uuid.uuid4())
+
+
+# ============================================================
+# INTERACTIVE CLI FOR TESTING
+# ============================================================
+
+def run_interactive():
+    """Run interactive chatbot in terminal"""
+    print("\n" + "=" * 55)
+    print("  TSRN SMART REPAIR — UNIFIED CAR CHATBOT TESTER")
+    print("=" * 55)
+    print("\nAsk anything about cars. For repair quotes, describe the damage.")
+    session_id = new_session()
+    print(f"\nSession: {session_id[:8]}...")
+    print("\nCommands: 'history' | 'clear' | 'exit'\n")
+
+    while True:
+        try:
+            user_input = input("You: ").strip()
+
+            if not user_input:
+                continue
+
+            if user_input.lower() == "exit":
+                print("\nGoodbye!")
+                break
+
+            if user_input.lower() == "history":
+                hist = get_history(session_id)
+                if hist:
+                    print(f"\n--- History ({hist['total_messages']} messages) ---")
+                    for msg in hist['messages']:
+                        print(f"\n[{msg['role'].upper()}]\n{msg['content']}\n")
+                else:
+                    print("No history yet.\n")
+                continue
+
+            if user_input.lower() == "clear":
+                clear_history(session_id)
+                session_id = new_session()
+                print(f"✓ History cleared. New session: {session_id[:8]}...\n")
+                continue
+
+            print("\nLoading response...")
+            result = chat(session_id, user_input)
+
+            if result.get("pricing_applied"):
+                print(f"\nEXPERT + PRICING:\n{result['response']}\n")
+            else:
+                print(f"\nEXPERT:\n{result['response']}\n")
+
+            print(f"[Tokens: {result['tokens']}]\n")
+
+        except KeyboardInterrupt:
+            print("\n\nSession ended.")
+            break
+        except Exception as e:
+            print(f"\n❌ Error: {str(e)}\n")
+
+
+if __name__ == "__main__":
+    run_interactive()
+
