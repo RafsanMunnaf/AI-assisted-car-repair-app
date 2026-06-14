@@ -6,7 +6,7 @@ Run: python test_pricing_engine.py
 """
 
 import sys
-from pricing_engine import (
+from tsrn_repair_engine import (
     DamageClassification,
     PricingBreakdown,
     calculate_repair_cost,
